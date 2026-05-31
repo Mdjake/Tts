@@ -34,7 +34,7 @@ def transliterate_hinglish(text: str) -> str:
         resp = requests.get(
             TRANSLITERATE_API_URL,
             params={'text': text},
-            timeout=15
+            timeout=90
         )
         if resp.status_code == 200:
             data = json.loads(resp.text)

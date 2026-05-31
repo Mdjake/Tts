@@ -2,12 +2,14 @@ import requests
 from io import BytesIO
 from flask import Flask, request, jsonify, Response
 import os
+import urllib.parse
 
 app = Flask(__name__)
 
 LMNT_API_KEY = os.environ.get("LMNT_API_KEY", "1fdc497ee58b4172aa9a0b82a3e14054")
 LMNT_ENDPOINT = "https://api.lmnt.com/v1/ai/speech/bytes"
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
+GOOGLE_TRANSLITERATE_URL = "https://inputtools.google.com/request"
 CHUNK_SIZE = 4900  # safely under LMNT's 5000 char limit
 
 LMNT_VOICES = [
@@ -16,6 +18,41 @@ LMNT_VOICES = [
     "lucas", "morgan", "natalie", "nyssa", "ryan", "sadie",
     "stella", "tyler", "vesper", "violet", "warrick", "zain"
 ]
+
+
+# ─── Google Transliteration (Hinglish → Hindi script) ────────────────────────
+
+def transliterate_word(word: str) -> str:
+    """Convert a single Hinglish word to Hindi script using Google's free API."""
+    try:
+        params = {
+            'text': word,
+            'itc': 'hi-t-i0-und',
+            'num': '1',
+            'cp': '0',
+            'cs': '1',
+            'ie': 'utf-8',
+            'oe': 'utf-8'
+        }
+        response = requests.get(GOOGLE_TRANSLITERATE_URL, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            # Response format: ["SUCCESS",[["word",["हिंदी"],[],{...}]]]
+            if data[0] == 'SUCCESS' and data[1] and data[1][0][1]:
+                return data[1][0][1][0]
+    except Exception:
+        pass
+    return word  # return original if transliteration fails
+
+
+def transliterate_hinglish(text: str) -> str:
+    """
+    Convert full Hinglish sentence to Hindi script word by word.
+    Example: 'tumhara naam kya hai' → 'तुम्हारा नाम क्या है'
+    """
+    words = text.strip().split()
+    hindi_words = [transliterate_word(w) for w in words]
+    return ' '.join(hindi_words)
 
 
 # ─── Chunking ────────────────────────────────────────────────────────────────
@@ -124,8 +161,9 @@ def voices():
 @app.route('/tts', methods=['GET'])
 def tts():
     """Returns a tmpfiles.org URL to the generated MP3."""
-    voice = request.args.get('voice', '').strip()
-    text  = request.args.get('text', '').strip()
+    voice    = request.args.get('voice', '').strip()
+    text     = request.args.get('text', '').strip()
+    hinglish = request.args.get('hinglish', 'false').lower() == 'true'
 
     if not text:
         return jsonify({'success': False, 'error': 'Parameter "text" is required'}), 400
@@ -135,7 +173,11 @@ def tts():
         return jsonify({'success': False, 'error': f'Voice "{voice}" not found. Available: {", ".join(LMNT_VOICES)}'}), 400
 
     try:
-        chunks     = split_text(text)
+        original_text = text
+        if hinglish:
+            text = transliterate_hinglish(text)
+
+        chunks      = split_text(text)
         audio_parts = [generate_speech_chunk(c, voice) for c in chunks]
         final_audio = join_audio(audio_parts)
         audio_url   = upload_to_tmpfiles(final_audio)
@@ -144,7 +186,9 @@ def tts():
             'success': True,
             'url': audio_url,
             'chunks_processed': len(chunks),
-            'total_characters': len(text)
+            'total_characters': len(text),
+            'original_text': original_text if hinglish else None,
+            'transliterated_text': text if hinglish else None
         })
 
     except Exception as e:
@@ -154,8 +198,9 @@ def tts():
 @app.route('/audio', methods=['GET'])
 def audio():
     """Streams the raw MP3 directly — open this URL in Chrome to play instantly."""
-    voice = request.args.get('voice', '').strip()
-    text  = request.args.get('text', '').strip()
+    voice    = request.args.get('voice', '').strip()
+    text     = request.args.get('text', '').strip()
+    hinglish = request.args.get('hinglish', 'false').lower() == 'true'
 
     if not text:
         return jsonify({'success': False, 'error': 'Parameter "text" is required'}), 400
@@ -165,6 +210,9 @@ def audio():
         return jsonify({'success': False, 'error': f'Voice "{voice}" not found. Available: {", ".join(LMNT_VOICES)}'}), 400
 
     try:
+        if hinglish:
+            text = transliterate_hinglish(text)
+
         chunks      = split_text(text)
         audio_parts = [generate_speech_chunk(c, voice) for c in chunks]
         final_audio = join_audio(audio_parts)
@@ -175,7 +223,8 @@ def audio():
             headers={
                 'Content-Disposition': 'inline; filename=speech.mp3',
                 'X-Chunks-Processed': str(len(chunks)),
-                'X-Total-Characters': str(len(text))
+                'X-Total-Characters': str(len(text)),
+                'X-Transliterated': text if hinglish else ''
             }
         )
 

@@ -1,4 +1,5 @@
 import requests
+import json
 from io import BytesIO
 from flask import Flask, request, jsonify, Response
 import os
@@ -8,8 +9,11 @@ app = Flask(__name__)
 LMNT_API_KEY = os.environ.get("LMNT_API_KEY", "1fdc497ee58b4172aa9a0b82a3e14054")
 LMNT_ENDPOINT = "https://api.lmnt.com/v1/ai/speech/bytes"
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
-GOOGLE_TRANSLITERATE_URL = "https://inputtools.google.com/request"
 CHUNK_SIZE = 4900
+
+# ─── PASTE YOUR TRANSLITERATE API URL HERE ────────────────────────────────────
+TRANSLITERATE_API_URL = "https://transliterate-xi.vercel.app/transliterate"
+# ─────────────────────────────────────────────────────────────────────────────
 
 LMNT_VOICES = [
     "ansel", "autumn", "bella", "brandon", "cassian", "elowen",
@@ -19,59 +23,26 @@ LMNT_VOICES = [
 ]
 
 
-# ─── Google Transliteration (Hinglish → Hindi script) ────────────────────────
+# ─── Transliteration (calls your separate transliterate API) ─────────────────
 
 def transliterate_hinglish(text: str) -> str:
     """
-    Convert Hinglish to Hindi script word by word using Google's free API.
-    If Google API fails for any word, keeps the original word.
-    If entire function crashes, returns original text so audio still works.
-    Example: 'tumhara naam kya hai' → 'तुम्हारा नाम क्या है'
+    Calls your deployed transliterate API to convert Hinglish → Hindi script.
+    Falls back to original text if the API call fails.
     """
-    words = text.strip().split()
-    if not words:
-        return text
-
-    hindi_words = []
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
-    }
-
-    for word in words:
-        try:
-            resp = requests.get(
-                GOOGLE_TRANSLITERATE_URL,
-                params={
-                    'text': word,
-                    'itc': 'hi-t-i0-und',
-                    'num': '1',
-                    'cp': '0',
-                    'cs': '1',
-                    'ie': 'utf-8',
-                    'oe': 'utf-8'
-                },
-                headers=headers,
-                timeout=8
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if (
-                    isinstance(data, list) and
-                    len(data) > 1 and
-                    data[0] == 'SUCCESS' and
-                    data[1] and
-                    data[1][0][1]
-                ):
-                    hindi_words.append(data[1][0][1][0])
-                else:
-                    hindi_words.append(word)
-            else:
-                hindi_words.append(word)
-        except Exception:
-            hindi_words.append(word)  # keep original word on any error
-
-    return ' '.join(hindi_words)
+    try:
+        resp = requests.get(
+            TRANSLITERATE_API_URL,
+            params={'text': text},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            data = json.loads(resp.text)
+            if data.get('success') and data.get('hindi'):
+                return data['hindi']
+    except Exception as e:
+        print(f"Transliterate API error: {e}")
+    return text  # fallback to original text
 
 
 # ─── Chunking ────────────────────────────────────────────────────────────────
@@ -149,15 +120,14 @@ def index():
         'name': 'LMNT Text-to-Speech API',
         'description': 'Unlimited-length AI speech synthesis powered by LMNT',
         'endpoints': {
-            'GET /tts':         'Generate audio URL (params: voice, text, hinglish)',
-            'GET /audio':       'Stream raw MP3 directly (params: voice, text, hinglish)',
-            'GET /transliterate': 'Convert Hinglish to Hindi script (param: text)',
-            'GET /voices':      'List all available voices'
+            'GET /tts':    'Generate audio URL — returns JSON with tmpfiles link',
+            'GET /audio':  'Stream raw MP3 directly — open in browser to play',
+            'GET /voices': 'List all available voices'
         },
         'params': {
-            'voice':    'required — voice name',
-            'text':     'required — your text',
-            'hinglish': 'optional — true/false, converts Hinglish to Hindi script before TTS'
+            'voice':    'required — voice name e.g. leah',
+            'text':     'required — any length text',
+            'hinglish': 'optional — true/false, converts Hinglish to Hindi before TTS'
         }
     })
 
@@ -169,19 +139,6 @@ def voices():
         'total': len(LMNT_VOICES),
         'voices': LMNT_VOICES
     })
-
-
-@app.route('/transliterate', methods=['GET'])
-def transliterate():
-    """Test endpoint — convert Hinglish to Hindi script only, no audio."""
-    text = request.args.get('text', '').strip()
-    if not text:
-        return jsonify({'success': False, 'error': 'Parameter "text" is required'}), 400
-    try:
-        hindi = transliterate_hinglish(text)
-        return jsonify({'success': True, 'original': text, 'hindi': hindi})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/tts', methods=['GET'])
@@ -292,6 +249,21 @@ def tts_post():
         })
 
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'success': False, 'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'success': False, 'error': 'Internal server error'}), 500
+
+
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 3000)))
+
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

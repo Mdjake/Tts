@@ -2,7 +2,6 @@ import requests
 from io import BytesIO
 from flask import Flask, request, jsonify, Response
 import os
-import urllib.parse
 
 app = Flask(__name__)
 
@@ -10,7 +9,7 @@ LMNT_API_KEY = os.environ.get("LMNT_API_KEY", "1fdc497ee58b4172aa9a0b82a3e14054"
 LMNT_ENDPOINT = "https://api.lmnt.com/v1/ai/speech/bytes"
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
 GOOGLE_TRANSLITERATE_URL = "https://inputtools.google.com/request"
-CHUNK_SIZE = 4900  # safely under LMNT's 5000 char limit
+CHUNK_SIZE = 4900
 
 LMNT_VOICES = [
     "ansel", "autumn", "bella", "brandon", "cassian", "elowen",
@@ -22,46 +21,62 @@ LMNT_VOICES = [
 
 # ─── Google Transliteration (Hinglish → Hindi script) ────────────────────────
 
-def transliterate_word(word: str) -> str:
-    """Convert a single Hinglish word to Hindi script using Google's free API."""
-    try:
-        params = {
-            'text': word,
-            'itc': 'hi-t-i0-und',
-            'num': '1',
-            'cp': '0',
-            'cs': '1',
-            'ie': 'utf-8',
-            'oe': 'utf-8'
-        }
-        response = requests.get(GOOGLE_TRANSLITERATE_URL, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            # Response format: ["SUCCESS",[["word",["हिंदी"],[],{...}]]]
-            if data[0] == 'SUCCESS' and data[1] and data[1][0][1]:
-                return data[1][0][1][0]
-    except Exception:
-        pass
-    return word  # return original if transliteration fails
-
-
 def transliterate_hinglish(text: str) -> str:
     """
-    Convert full Hinglish sentence to Hindi script word by word.
+    Convert Hinglish to Hindi script word by word using Google's free API.
+    If Google API fails for any word, keeps the original word.
+    If entire function crashes, returns original text so audio still works.
     Example: 'tumhara naam kya hai' → 'तुम्हारा नाम क्या है'
     """
     words = text.strip().split()
-    hindi_words = [transliterate_word(w) for w in words]
+    if not words:
+        return text
+
+    hindi_words = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*',
+    }
+
+    for word in words:
+        try:
+            resp = requests.get(
+                GOOGLE_TRANSLITERATE_URL,
+                params={
+                    'text': word,
+                    'itc': 'hi-t-i0-und',
+                    'num': '1',
+                    'cp': '0',
+                    'cs': '1',
+                    'ie': 'utf-8',
+                    'oe': 'utf-8'
+                },
+                headers=headers,
+                timeout=8
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if (
+                    isinstance(data, list) and
+                    len(data) > 1 and
+                    data[0] == 'SUCCESS' and
+                    data[1] and
+                    data[1][0][1]
+                ):
+                    hindi_words.append(data[1][0][1][0])
+                else:
+                    hindi_words.append(word)
+            else:
+                hindi_words.append(word)
+        except Exception:
+            hindi_words.append(word)  # keep original word on any error
+
     return ' '.join(hindi_words)
 
 
 # ─── Chunking ────────────────────────────────────────────────────────────────
 
 def split_text(text: str, chunk_size: int = CHUNK_SIZE) -> list:
-    """
-    Split text into chunks of max chunk_size characters.
-    Breaks at sentence boundaries first, then word boundaries.
-    """
     if len(text) <= chunk_size:
         return [text]
 
@@ -70,18 +85,14 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE) -> list:
         window = text[:chunk_size]
         split_pos = -1
 
-        # Try sentence boundary
         for delimiter in [". ", "! ", "? ", ".\n", "!\n", "?\n"]:
             pos = window.rfind(delimiter)
             if pos != -1:
                 split_pos = pos + len(delimiter)
                 break
 
-        # Fall back to word boundary
         if split_pos == -1:
             split_pos = window.rfind(" ")
-
-        # Hard cut as last resort
         if split_pos == -1:
             split_pos = chunk_size
 
@@ -138,13 +149,15 @@ def index():
         'name': 'LMNT Text-to-Speech API',
         'description': 'Unlimited-length AI speech synthesis powered by LMNT',
         'endpoints': {
-            'GET /tts':    'Generate audio URL (params: voice, text)',
-            'GET /audio':  'Stream raw MP3 directly (params: voice, text)',
-            'GET /voices': 'List all available voices'
+            'GET /tts':         'Generate audio URL (params: voice, text, hinglish)',
+            'GET /audio':       'Stream raw MP3 directly (params: voice, text, hinglish)',
+            'GET /transliterate': 'Convert Hinglish to Hindi script (param: text)',
+            'GET /voices':      'List all available voices'
         },
-        'limits': {
-            'text_length': 'Unlimited — auto-chunked at 4900 chars internally',
-            'lmnt_limit_per_chunk': 5000
+        'params': {
+            'voice':    'required — voice name',
+            'text':     'required — your text',
+            'hinglish': 'optional — true/false, converts Hinglish to Hindi script before TTS'
         }
     })
 
@@ -158,9 +171,21 @@ def voices():
     })
 
 
+@app.route('/transliterate', methods=['GET'])
+def transliterate():
+    """Test endpoint — convert Hinglish to Hindi script only, no audio."""
+    text = request.args.get('text', '').strip()
+    if not text:
+        return jsonify({'success': False, 'error': 'Parameter "text" is required'}), 400
+    try:
+        hindi = transliterate_hinglish(text)
+        return jsonify({'success': True, 'original': text, 'hindi': hindi})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/tts', methods=['GET'])
 def tts():
-    """Returns a tmpfiles.org URL to the generated MP3."""
     voice    = request.args.get('voice', '').strip()
     text     = request.args.get('text', '').strip()
     hinglish = request.args.get('hinglish', 'false').lower() == 'true'
@@ -197,7 +222,6 @@ def tts():
 
 @app.route('/audio', methods=['GET'])
 def audio():
-    """Streams the raw MP3 directly — open this URL in Chrome to play instantly."""
     voice    = request.args.get('voice', '').strip()
     text     = request.args.get('text', '').strip()
     hinglish = request.args.get('hinglish', 'false').lower() == 'true'
@@ -210,8 +234,10 @@ def audio():
         return jsonify({'success': False, 'error': f'Voice "{voice}" not found. Available: {", ".join(LMNT_VOICES)}'}), 400
 
     try:
+        transliterated = None
         if hinglish:
-            text = transliterate_hinglish(text)
+            transliterated = transliterate_hinglish(text)
+            text = transliterated
 
         chunks      = split_text(text)
         audio_parts = [generate_speech_chunk(c, voice) for c in chunks]
@@ -224,7 +250,7 @@ def audio():
                 'Content-Disposition': 'inline; filename=speech.mp3',
                 'X-Chunks-Processed': str(len(chunks)),
                 'X-Total-Characters': str(len(text)),
-                'X-Transliterated': text if hinglish else ''
+                'X-Transliterated': transliterated or ''
             }
         )
 
@@ -232,13 +258,12 @@ def audio():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ─── POST versions (for very long texts avoiding URL length limits) ───────────
-
 @app.route('/tts', methods=['POST'])
 def tts_post():
-    data  = request.get_json(force=True) or {}
-    voice = data.get('voice', '').strip()
-    text  = data.get('text', '').strip()
+    data     = request.get_json(force=True) or {}
+    voice    = data.get('voice', '').strip()
+    text     = data.get('text', '').strip()
+    hinglish = str(data.get('hinglish', 'false')).lower() == 'true'
 
     if not text:
         return jsonify({'success': False, 'error': 'Field "text" is required'}), 400
@@ -248,6 +273,10 @@ def tts_post():
         return jsonify({'success': False, 'error': f'Voice "{voice}" not found. Available: {", ".join(LMNT_VOICES)}'}), 400
 
     try:
+        original_text = text
+        if hinglish:
+            text = transliterate_hinglish(text)
+
         chunks      = split_text(text)
         audio_parts = [generate_speech_chunk(c, voice) for c in chunks]
         final_audio = join_audio(audio_parts)
@@ -257,7 +286,9 @@ def tts_post():
             'success': True,
             'url': audio_url,
             'chunks_processed': len(chunks),
-            'total_characters': len(text)
+            'total_characters': len(text),
+            'original_text': original_text if hinglish else None,
+            'transliterated_text': text if hinglish else None
         })
 
     except Exception as e:

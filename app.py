@@ -9,7 +9,7 @@ app = Flask(__name__)
 LMNT_API_KEY = os.environ.get("LMNT_API_KEY", "1fdc497ee58b4172aa9a0b82a3e14054")
 LMNT_ENDPOINT = "https://api.lmnt.com/v1/ai/speech/bytes"
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
-CHUNK_SIZE = 4900
+CHUNK_SIZE = 4800
 
 # ─── PASTE YOUR TRANSLITERATE API URL HERE ────────────────────────────────────
 TRANSLITERATE_API_URL = "https://transliterate-xi.vercel.app/transliterate"

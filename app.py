@@ -3,8 +3,13 @@ import json
 from io import BytesIO
 from flask import Flask, request, jsonify, Response
 import os
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
+
+
+
 
 LMNT_API_KEY = os.environ.get("LMNT_API_KEY", "1fdc497ee58b4172aa9a0b82a3e14054")
 LMNT_ENDPOINT = "https://api.lmnt.com/v1/ai/speech/bytes"
